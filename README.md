@@ -1,1 +1,0 @@
-# systemtic_data_analysis

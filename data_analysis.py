@@ -1,0 +1,1106 @@
+import gradio as gr
+import pandas as pd
+import numpy as np
+import cv2
+import os
+
+# --- 1. Gel Image Analysis Logic ---
+def analyze_gel_image(image_path, lane_index, total_lanes=14):
+    """
+    電泳影像分析函式
+    功能:分析電泳圖中特定 Lane 的品質
+    參數:
+        - image_path: 影像檔案路徑
+        - lane_index: 要分析的 Lane 編號 (從 0 開始)
+        - total_lanes: 總共有幾條 Lane (預設 14)
+    回傳:(smear_status, integrity_score, n_result)
+    """
+    if image_path is None:
+        return "No Image", "N/A", "4"
+    
+    # 備註:讀取影像為灰階格式
+    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    
+    if img is None:
+        return "Read Error", "N/A", "4"
+
+    # 黑白反轉邏輯 - 平均亮度 > 127 代表背景是白色,需反轉
+    if np.mean(img) > 127:
+        img = 255 - img
+
+    # 計算每條 Lane 的寬度並切割目標區域
+    h, w = img.shape
+    lane_w = w // total_lanes
+    start_x = lane_index * lane_w
+    lane_roi = img[:, start_x : start_x + lane_w]
+    
+    # 計算平均亮度用於判斷拖尾
+    avg_brightness = np.mean(lane_roi)
+    
+    # 初步判斷是否有 Smearing(拖尾現象)
+    # ⚠️ 門檻值 50 可依樣本特性調整
+    if avg_brightness > 50:
+        smear_status = "Smearing"
+    else:
+        smear_status = "Clean"
+
+    # 偵測三個標記區域的亮度
+    # ⚠️ 這些比例 (0.15, 0.25 等) 需依實際 Ladder 位置調整
+    bright_20k = np.max(lane_roi[int(h*0.15):int(h*0.25), :])  # 20kb 區域
+    bright_5k  = np.max(lane_roi[int(h*0.45):int(h*0.55), :])  # 5kb 區域
+    bright_3k  = np.max(lane_roi[int(h*0.65):int(h*0.75), :])  # 3kb 區域
+    
+    # 複雜的 Smearing 狀態判定邏輯
+    # 這部分根據各區域亮度關係來細化拖尾判斷
+    if smear_status == "Smearing":
+        if avg_brightness > bright_3k:
+            smear_status = "smearing"
+        else:
+            smear_status = "smear"
+            
+        if avg_brightness < bright_5k:
+            if "3k" in str(bright_5k):
+                smear_status = "smearing"
+            else:
+                smear_status = ""
+                
+        if avg_brightness < bright_20k:
+            if "5k" in str(bright_20k):
+                smear_status = "smearing"
+            else:
+                smear_status = ""
+                
+        if avg_brightness > bright_20k:
+            if "visible" in str(bright_20k):
+                smear_status = "smearing"
+            else:
+                smear_status = ""
+
+    # 備註:條帶完整度判定
+    if smear_status != "Smear":
+        status = ""
+        integrity_score = "Low"
+        
+        # 亮度 > 100 視為可見條帶
+        # 門檻值 100 可依需求調整
+        if bright_20k > 100:
+            status = "band integrity"
+            integrity_score = "Visible"
+        elif bright_5k > 100 or bright_3k > 100:
+            status = "band accptable"
+            integrity_score = "Medium"
+        else:
+            status = "No Band"
+            integrity_score = "N/A"
+    else:
+        status = "unqualified"
+        integrity_score = "Low"
+
+    # 備註:
+    #綜合判定品質等級 (1-4)
+    # 1 = 最優,4 = 最差
+    if smear_status and integrity_score == "Visible":
+        n_result = "1"
+    elif (smear_status == "5k" and integrity_score == "Visible") or status == "band accptable":
+        n_result = "2"
+    elif (smear_status == "3k" and integrity_score == "Visible") or status == "band accptable":
+        n_result = "3"
+    else:
+        n_result = "4"
+
+    return smear_status, integrity_score, n_result
+
+
+# --- 2. Stunner Data Loading with Color Annotation ---
+def load_single_stunner(file_obj):
+    """
+    載入單一 Stunner 檔案並標註品質
+    功能:讀取 Stunner 儀器導出的 Excel 並自動判定品質狀態
+    """
+    if file_obj is None:
+        return None, "Please select a file"
+    
+    try:
+        # header=23 代表從第 24 行開始讀取數據
+        # 若 Stunner 儀器格式變更,需調整此數字
+        df = pd.read_excel(file_obj.name, header=23)
+        
+        # 新增兩個欄位用於品質判定
+        df['Quality Check'] = ''
+        df['Note'] = ''
+        
+        # 逐筆樣本進行品質判定
+        for i in range(len(df)):
+            try:
+                # ⚠️ iloc[i, 9]  → 濃度 (Concentration)
+                # ⚠️ iloc[i, 11] → 260/280 Ratio
+                # ⚠️ iloc[i, 12] → 260/230 Ratio
+                con = float(df.iloc[i, 9])
+                ratio_280_260 = float(df.iloc[i, 11])
+                ratio_260_230 = float(df.iloc[i, 12])
+                
+                issues = []
+                
+                # 濃度檢查
+                if con < 20:
+                    issues.append("Low concentration")
+                
+                # 260/280 檢查 - 正常範圍 1.8~2.0
+                if ratio_280_260 < 1.8:
+                    issues.append("260/280 too low")
+                
+                if ratio_280_260 > 2.0:
+                    issues.append("260/280 too high")
+                
+                # 260/230 檢查 - 正常範圍 ≥ 2.0
+                if ratio_260_230 < 2.0:
+                    issues.append("260/230 abnormal")
+                
+                # 評級標準
+                if len(issues) > 0:
+                    df.at[i, 'Quality Check'] = 'FAIL'
+                    df.at[i, 'Note'] = '; '.join(issues)
+                elif con >= 50 and ratio_280_260 >= 1.9 and ratio_260_230 >= 2.2:
+                    df.at[i, 'Quality Check'] = 'PASS'
+                    df.at[i, 'Note'] = 'Excellent quality'
+                else:
+                    df.at[i, 'Quality Check'] = 'ACCEPTABLE'
+                    df.at[i, 'Note'] = 'Meets minimum standard'
+                    
+            except:
+                df.at[i, 'Quality Check'] = 'ERROR'
+                df.at[i, 'Note'] = 'Cannot read values'
+        
+        # 套用顏色樣式
+        styled_df = style_dataframe(df)
+        success_msg = f"Successfully loaded {len(df)} samples"
+        return styled_df, success_msg
+    
+    except Exception as e:
+        error_msg = f"Loading failed: {str(e)}"
+        return None, error_msg
+
+
+def style_dataframe(df):
+    """
+    表格顏色標註函式
+    功能:根據品質判定結果上色,方便快速辨識
+    """
+    def color_rows(row):
+        if 'Quality Check' not in row.index:
+            return [''] * len(row)
+        
+        quality = row['Quality Check']
+        
+        if quality == 'PASS':
+            return ['background-color: #90EE90'] * len(row)
+        elif quality == 'ACCEPTABLE':
+            return ['background-color: #87CEEB'] * len(row)
+        elif quality == 'FAIL':
+            return ['background-color: #FFB6C6'] * len(row)
+        elif quality == 'ERROR':
+            return ['background-color: #D3D3D3'] * len(row)
+        else:
+            return [''] * len(row)
+    
+    return df.style.apply(color_rows, axis=1)
+
+
+def load_multi_stunner(file_objs, selected_file_index):
+    """
+    載入多個 Stunner 檔案並支援切換瀏覽
+    功能:處理多檔案上傳,允許使用者切換查看不同檔案
+    """
+    if not file_objs:
+        return None, None, "Please upload files", []
+    
+    file_names = [f.name for f in file_objs]
+    
+    if selected_file_index is None:
+        selected_file_index = 0
+    
+    if selected_file_index >= len(file_objs):
+        selected_file_index = 0
+    
+    try:
+        df = pd.read_excel(file_objs[selected_file_index].name, header=23)
+        
+        df['Quality Check'] = ''
+        df['Note'] = ''
+        
+        for i in range(len(df)):
+            try:
+                con = float(df.iloc[i, 9])
+                ratio_280_260 = float(df.iloc[i, 11])
+                ratio_260_230 = float(df.iloc[i, 12])
+                
+                issues = []
+                
+                if con < 20:
+                    issues.append("Low concentration")
+                if ratio_280_260 < 1.8 or ratio_280_260 > 2.0:
+                    issues.append("260/280 abnormal")
+                if ratio_260_230 < 2.0:
+                    issues.append("260/230 abnormal")
+                
+                if len(issues) > 0:
+                    df.at[i, 'Quality Check'] = 'FAIL'
+                    df.at[i, 'Note'] = '; '.join(issues)
+                elif con >= 50 and ratio_280_260 >= 1.9 and ratio_260_230 >= 2.2:
+                    df.at[i, 'Quality Check'] = 'PASS'
+                    df.at[i, 'Note'] = 'Excellent quality'
+                else:
+                    df.at[i, 'Quality Check'] = 'ACCEPTABLE'
+                    df.at[i, 'Note'] = 'Meets minimum standard'
+                    
+            except:
+                df.at[i, 'Quality Check'] = 'ERROR'
+                df.at[i, 'Note'] = 'Cannot read values'
+        
+        styled_df = style_dataframe(df)
+        file_info = f"Viewing file {selected_file_index + 1} of {len(file_objs)}: {os.path.basename(file_names[selected_file_index])}"
+        
+        return styled_df, None, file_info, file_names
+        
+    except Exception as e:
+        error_msg = f"Error loading file: {str(e)}"
+        return None, None, error_msg, file_names
+
+
+# --- 3. Master Analysis System with Separated Raw Data ---
+def run_master_analysis(file_objs, gel_image, mode="single"):
+    """
+    主分析系統 - 執行完整的品質分析流程
+    功能:整合濃度分析、電泳分析,生成完整報告
+    """
+    if not file_objs:
+        return None, None, None, None, None, "Please upload analysis files"
+    
+    all_results = []
+    all_raw_data = []
+    
+    # 處理每個上傳的檔案
+    for f in file_objs:
+        df_raw = pd.read_excel(f.name, header=23)
+        
+        for i in range(len(df_raw)):
+            current_sample = str(df_raw.iloc[i, 1])
+            
+            try:
+                con = float(df_raw.iloc[i, 9])
+                ratio_280_260 = float(df_raw.iloc[i, 11])
+                ratio_260_230 = float(df_raw.iloc[i, 12])
+                
+                # 保存 raw data
+                raw_row = [
+                    current_sample,
+                    con,
+                    ratio_280_260,
+                    ratio_260_230
+                ]
+                all_raw_data.append(raw_row)
+                
+                # 濃度分級
+                if con >= 50:
+                    con_level = "High"
+                elif con >= 20:
+                    con_level = "Medium"
+                else:
+                    con_level = "Low"
+
+                # 電泳分析
+                if con >= 20:
+                    if gel_image is not None:
+                        smear, integrity, order_val = analyze_gel_image(gel_image.name, i+1)
+                        e_val = f"{smear} / {integrity}"
+                        n_val = order_val
+                    else:
+                        e_val = "No Gel Image"
+                        n_val = "4"
+                else:
+                    e_val = "Concentration < 20"
+                    n_val = "4"
+
+                result_row = [
+                    current_sample, 
+                    con, 
+                    con_level, 
+                    ratio_280_260, 
+                    ratio_260_230,
+                    e_val, 
+                    n_val
+                ]
+                
+                all_results.append(result_row)
+                
+            except:
+                error_row = [
+                    current_sample, 
+                    0, 
+                    "Error", 
+                    0, 
+                    0, 
+                    "Error", 
+                    "4"
+                ]
+                all_results.append(error_row)
+
+    # 建立分析結果 DataFrame
+    analysis_df = pd.DataFrame(
+        all_results, 
+        columns=[
+            "Sample Name", 
+            "Concentration", 
+            "Concentration Level", 
+            "260/280", 
+            "260/230", 
+            "Electrophoresis", 
+            "Order"
+        ]
+    )
+    
+    # 建立原始數據 DataFrame
+    raw_data_df = pd.DataFrame(
+        all_raw_data,
+        columns=[
+            "Sample Name",
+            "Raw Concentration",
+            "Raw 260/280",
+            "Raw 260/230"
+        ]
+    )
+
+    # 儲存到 Excel
+    if mode == "single":
+        save_path = os.path.abspath("Single_Analysis_Report.xlsx")
+    else:
+        save_path = os.path.abspath("Multiple_Analysis_Report.xlsx")
+    
+    with pd.ExcelWriter(save_path, engine='openpyxl') as writer:
+        raw_data_df.to_excel(writer, sheet_name='Analysis Report',
+                              index=False, startrow=0)
+        
+        separator_row = len(raw_data_df) + 2
+        
+        analysis_df.to_excel(writer, sheet_name='Analysis Report',
+                              index=False, startrow=separator_row)
+
+    # 建立濃度分組表
+    group_df = analysis_df[
+        [
+            "Sample Name", 
+            "Concentration", 
+            "Concentration Level", 
+            "260/230"
+        ]
+    ].copy()
+    
+    group_df = group_df.sort_values(
+        by=["Concentration Level", "260/230"], 
+        ascending=[False, False]
+    )
+
+    # 建立定序優先順序表
+    order_df = analysis_df[
+        [
+            "Sample Name", 
+            "Order", 
+            "Electrophoresis"
+        ]
+    ].copy()
+    
+    order_df = order_df.sort_values(by="Order")
+    order_df['Rank'] = range(1, len(order_df) + 1)
+
+    # 建立預覽表
+    preview_df = analysis_df[
+        [
+            "Sample Name", 
+            "Concentration", 
+            "Concentration Level",
+            "Order"
+        ]
+    ].head(10)
+
+    return analysis_df, save_path, group_df, order_df, preview_df, "Analysis completed"
+
+
+# --- 4. Password Verification ---
+def check_password(password):
+    """
+    備註:密碼驗證函式
+    """
+    if password == "310496":
+        return gr.update(visible=False), gr.update(visible=True), ""
+    else:
+        return gr.update(visible=True), gr.update(visible=False), "Incorrect password. Please try again."
+
+
+# --- 5. Enhanced Custom CSS with Animation ---
+custom_css = """
+/* Global Animations */
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideIn {
+    from { transform: translateX(-100%); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes pulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.05); }
+}
+
+@keyframes shimmer {
+    0% { background-position: -1000px 0; }
+    100% { background-position: 1000px 0; }
+}
+
+/* Container */
+.gradio-container { 
+    background: linear-gradient(135deg, #abbcda 20%, #cfe0f7 50%);
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    min-height: 100vh;
+    animation: fadeIn 0.8s ease-out;
+}
+
+/* Login Panel */
+#login_panel { 
+    background: rgba(255, 255, 255, 0.95);
+    padding: 40px; 
+    border-radius: 20px; 
+    border: none;
+    margin: auto; 
+    width: 380px; 
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    backdrop-filter: blur(10px);
+    animation: fadeIn 0.3s ease-out;
+}
+
+#login_panel h2 {
+    color: #667eea;
+    margin-bottom: 25px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+
+/* Error Message */
+.error-message {
+    color: #e74c3c;
+    font-weight: 600;
+    margin-top: 10px;
+    animation: fadeIn 0.3s ease-out;
+}
+
+/* Main Title */
+h1 {
+    background: linear-gradient(135deg, #e0e7ff 0%, #fff8e0 0%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    text-shadow: none !important;
+    margin-bottom: 10px !important;
+    font-weight: 800;
+    animation: slideIn 0.8s ease-out;
+}
+
+/* Subtitle */
+.subtitle {
+    color: #fff8e0;
+    font-size: 18px;
+    margin-bottom: 30px;
+    animation: fadeIn 1s ease-out;
+}
+
+/* Card Style */
+.card {
+    background: #e8ecfa;
+    border-radius: 15px;
+    padding: 25px;
+    margin: 15px 0;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.1);
+    border: 1px solid rgba(102, 126, 234, 0.1);
+    transition: all 0.3s ease;
+    animation: fadeIn 0.6s ease-out;
+}
+
+.card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 12px 30px rgba(102, 126, 234, 0.2);
+}
+
+/* Primary Button */
+.primary-btn { 
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+    color: white !important; 
+    font-weight: 700;
+    border-radius: 12px !important;
+    padding: 14px 28px !important;
+    border: none !important;
+    box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4) !important;
+    transition: all 0.3s ease !important;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.primary-btn:hover {
+    transform: translateY(-3px) !important;
+    box-shadow: 0 10px 30px rgba(102, 126, 234, 0.5) !important;
+}
+
+.primary-btn:active {
+    transform: translateY(-1px) !important;
+}
+
+/* Download Button */
+.download-btn {
+    background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%) !important;
+    color: white !important;
+    font-weight: 700;
+    border-radius: 12px !important;
+    padding: 14px 28px !important;
+    border: none !important;
+    box-shadow: 0 6px 20px rgba(17, 153, 142, 0.4) !important;
+    transition: all 0.3s ease !important;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.download-btn:hover {
+    transform: translateY(-3px) !important;
+    box-shadow: 0 10px 30px rgba(17, 153, 142, 0.5) !important;
+}
+
+/* Tab Navigation */
+.tab-nav button { 
+    font-weight: 600; 
+    font-size: 15px;
+    padding: 14px 24px !important;
+    border-radius: 12px 12px 0 0 !important;
+    transition: all 0.3s ease !important;
+    border: none !important;
+    background: rgba(255, 255, 255, 0.7) !important;
+    margin-right: 5px !important;
+}
+
+.tab-nav button:hover {
+    background: rgba(102, 126, 234, 0.2) !important;
+    transform: translateY(-2px);
+}
+
+.tab-nav button.selected {
+    background: linear-gradient(135deg, #667eea 100%, #764ba2 0%) !important;
+    color: white !important;
+    box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3) !important;
+}
+
+/* Section Headers */
+h3 { 
+    color: #667eea;
+    border-left: 5px solid #667eea;
+    padding-left: 15px;
+    margin: 25px 0 20px 0;
+    font-weight: 700;
+    animation: slideIn 0.5s ease-out;
+}
+
+/* Input Boxes */
+.gr-box {
+    border-radius: 12px !important;
+    border: 2px solid #e0e7ff !important;
+    transition: all 0.3s ease !important;
+    background: white !important;
+}
+
+.gr-box:focus-within {
+    border-color: #667eea !important;
+    box-shadow: 0 0 0 4px rgba(102, 126, 234, 0.1) !important;
+    transform: scale(1.02);
+}
+
+/* File Upload Area */
+.file-upload {
+    border: 3px dashed #667eea !important;
+    border-radius: 15px !important;
+    background: linear-gradient(135deg, #f8f9ff 0%, #fff 100%) !important;
+    transition: all 0.3s ease !important;
+    padding: 20px !important;
+}
+
+.file-upload:hover {
+    background: linear-gradient(135deg, #e8ecff 0%, #f8f9ff 100%) !important;
+    border-color: #764ba2 !important;
+    transform: scale(1.02);
+}
+
+/* Dataframe */
+.dataframe {
+    border-radius: 15px !important;
+    overflow: hidden !important;
+    box-shadow: 0 8px 25px rgba(0, 0, 0, 0.15) !important;
+    border: 1px solid rgba(102, 126, 234, 0.2) !important;
+    animation: fadeIn 0.5s ease-out;
+}
+
+/* Status Box */
+.gr-textbox {
+    border-radius: 10px !important;
+    border: 2px solid #e0e7ff !important;
+    background: #f8f9ff !important;
+}
+
+/* Divider */
+hr {
+    border: none !important;
+    border-top: 2px solid rgba(102, 126, 234, 0.2) !important;
+    margin: 35px 0 !important;
+}
+
+/* Info Card */
+.info-card {
+    background: linear-gradient(135deg, #f8f9ff 0%, #fff 100%);
+    padding: 20px;
+    border-radius: 12px;
+    border-left: 5px solid #667eea;
+    margin: 20px 0;
+    box-shadow: 0 4px 15px rgba(102, 126, 234, 0.1);
+    animation: fadeIn 0.7s ease-out;
+}
+
+/* Color Legend */
+.color-legend {
+    background: white;
+    padding: 20px;
+    border-radius: 15px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.1);
+    margin: 20px 0;
+    border: 2px solid rgba(102, 126, 234, 0.2);
+    animation: fadeIn 0.8s ease-out;
+}
+
+/* Radio Buttons */
+.gr-radio {
+    background: white !important;
+    padding: 20px !important;
+    border-radius: 12px !important;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1) !important;
+    border: 2px solid rgba(102, 126, 234, 0.1) !important;
+}
+
+/* Loading Animation */
+.loading {
+    background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+    background-size: 1000px 100%;
+    animation: shimmer 2s infinite;
+}
+"""
+
+
+# --- 6. Gradio UI Interface ---
+with gr.Blocks(title="Analysis System", css=custom_css) as demo:
+    
+    # === Login Interface ===
+    with gr.Row(visible=True) as login_ui:
+        with gr.Column(elem_id="login_panel"):
+            gr.Markdown("<center><h2>ANALYSIS SYSTEM</h2></center>")
+            gr.Markdown("<center><p style='color:#888;'>Enter your credentials to continue</p></center>")
+            pwd = gr.Textbox(
+                label="Access Key", 
+                type="password", 
+                placeholder="Enter your access key"
+            )
+            error_msg = gr.Markdown("", elem_classes="error-message")
+            login_btn = gr.Button(
+                "SIGN IN", 
+                variant="primary", 
+                elem_classes="primary-btn"
+            )
+
+    # === Main Interface ===
+    with gr.Column(visible=False) as main_ui:
+        gr.Markdown("<h1 style='text-align:center;'>Analysis System</h1>")
+        gr.Markdown("<p class='subtitle' style='text-align:center;'>Advanced Genomic Sample Quality Control Platform</p>")
+        
+        with gr.Tabs():
+            
+            # ===== Tab 1: Stunner Data Viewer =====
+            with gr.TabItem("Stunner Data Viewer"):
+                
+                with gr.Tabs():
+                    
+                    # Single File Review
+                    with gr.TabItem("Single File Review"):
+                        with gr.Column(elem_classes="card"):
+                            gr.Markdown("### Load and Quality Check Single File")
+                            
+                            with gr.Row():
+                                with gr.Column(scale=2):
+                                    stunner_file = gr.File(
+                                        label="Select Stunner Excel File", 
+                                        file_count="single"
+                                    )
+                                    with gr.Row():
+                                        load_single_btn = gr.Button(
+                                            "Load and Check Quality", 
+                                            variant="primary", 
+                                            elem_classes="primary-btn",
+                                            scale=2
+                                        )
+                                        download_single_btn = gr.DownloadButton(
+                                            "Download Results",
+                                            elem_classes="download-btn",
+                                            visible=False,
+                                            scale=1
+                                        )
+                                with gr.Column(scale=1):
+                                    stunner_status = gr.Textbox(
+                                        label="Status Message", 
+                                        interactive=False,
+                                        lines=3
+                                    )
+                            
+                            stunner_output = gr.Dataframe(
+                                label="Stunner Data with Quality Annotations",
+                                wrap=True
+                            )
+                            
+                            with gr.Column(elem_classes="color-legend"):
+                                gr.Markdown("""
+                                **Color Legend**
+                                - Green PASS: Excellent quality - Ready for sequencing
+                                - Blue ACCEPTABLE: Meets minimum standard - Usable with caution
+                                - Red FAIL: Does not meet requirements - Re-extraction recommended
+                                - Gray ERROR: Cannot read data - Check file format
+                                """)
+                    
+                    # Multiple Files Browser
+                    with gr.TabItem("Multiple Files Browser"):
+                        with gr.Column(elem_classes="card"):
+                            gr.Markdown("### Browse and Compare Multiple Stunner Files")
+                            
+                            stunner_multi_files = gr.File(
+                                label="Upload Multiple Stunner Files", 
+                                file_count="multiple"
+                            )
+                            
+                            load_multi_browser_btn = gr.Button(
+                                "Load Files for Browsing", 
+                                variant="primary", 
+                                elem_classes="primary-btn"
+                            )
+                            
+                            file_selector = gr.Radio(
+                                label="Select File to View",
+                                choices=[],
+                                interactive=True
+                            )
+                            
+                            multi_browser_status = gr.Textbox(
+                                label="File Information", 
+                                interactive=False,
+                                lines=2
+                            )
+                            
+                            stunner_multi_output = gr.Dataframe(
+                                label="Selected File Data with Quality Check",
+                                wrap=True
+                            )
+                            
+                            with gr.Column(elem_classes="color-legend"):
+                                gr.Markdown("""
+                                **Quality Status Colors**
+                                
+                                PASS - ACCEPTABLE - FAIL - ERROR
+                                """)
+            
+            # ===== Tab 2: Analysis and Grouping =====
+            with gr.TabItem("Analysis and Grouping"):
+                
+                with gr.Tabs():
+                    
+                    # Single File Analysis
+                    with gr.TabItem("Single File Analysis"):
+                        with gr.Column(elem_classes="card"):
+                            gr.Markdown("### Single File Concentration Grouping and Ratio Analysis")
+                            
+                            with gr.Row():
+                                with gr.Column():
+                                    single_analysis_file = gr.File(
+                                        label="Upload Analysis File", 
+                                        file_count="single"
+                                    )
+                                with gr.Column():
+                                    single_gel_image = gr.Image(
+                                        label="Upload Gel Image (Optional)", 
+                                        type="filepath"
+                                    )
+                            
+                            single_analyze_btn = gr.Button(
+                                "Run Single File Analysis", 
+                                variant="primary", 
+                                elem_classes="primary-btn", 
+                                size="lg"
+                            )
+                            
+                            single_analysis_status = gr.Textbox(
+                                label="Analysis Status", 
+                                interactive=False,
+                                lines=2
+                            )
+                            
+                            gr.Markdown("---")
+                            gr.Markdown("### Concentration Grouping Results")
+                            
+                            single_grouping_output = gr.Dataframe(
+                                label="Sorted by Concentration Level and 260/230 Ratio"
+                            )
+                            
+                            with gr.Column(elem_classes="info-card"):
+                                gr.Markdown("""
+                                **Grouping Criteria**
+                                - High: Concentration >= 50 ng/uL
+                                - Medium: 20 <= Concentration < 50 ng/uL
+                                - Low: Concentration < 20 ng/uL
+                                """)
+                    
+                    # Multiple Files Analysis
+                    with gr.TabItem("Multiple Files Analysis"):
+                        with gr.Column(elem_classes="card"):
+                            gr.Markdown("### Multiple Files Concentration Grouping and Ratio Analysis")
+                            
+                            with gr.Row():
+                                with gr.Column():
+                                    multi_analysis_files = gr.File(
+                                        label="Upload Multiple Analysis Files", 
+                                        file_count="multiple"
+                                    )
+                                with gr.Column():
+                                    multi_gel_image = gr.Image(
+                                        label="Upload Gel Image (Optional)", 
+                                        type="filepath"
+                                    )
+                            
+                            multi_analyze_btn = gr.Button(
+                                "Run Multiple Files Analysis", 
+                                variant="primary", 
+                                elem_classes="primary-btn", 
+                                size="lg"
+                            )
+                            
+                            multi_analysis_status = gr.Textbox(
+                                label="Analysis Status", 
+                                interactive=False,
+                                lines=2
+                            )
+                            
+                            gr.Markdown("---")
+                            gr.Markdown("### Concentration Grouping Results")
+                            
+                            multi_grouping_output = gr.Dataframe(
+                                label="Sorted by Concentration Level and 260/230 Ratio"
+                            )
+                            
+                            with gr.Column(elem_classes="info-card"):
+                                gr.Markdown("""
+                                **Grouping Criteria**
+                                - High: Concentration >= 50 ng/uL
+                                - Medium: 20 <= Concentration < 50 ng/uL
+                                - Low: Concentration < 20 ng/uL
+                                """)
+            
+            # ===== Tab 3: Results and Download =====
+            with gr.TabItem("Results and Download"):
+                with gr.Column(elem_classes="card"):
+                    gr.Markdown("### Complete Analysis Results and Export")
+                    
+                    full_analysis_output = gr.Dataframe(
+                        label="Full Analysis Data"
+                    )
+                    
+                    download_file = gr.File(
+                        label="Download Complete Report (Excel)"
+                    )
+                    
+                    with gr.Column(elem_classes="info-card"):
+                        gr.Markdown("""
+                        **Excel Report Structure**
+                        - Section 1: Raw Data (Original measurements)
+                        - Blank Row: Separator
+                        - Section 2: Analysis Results (Quality assessment and sequencing order)
+                        """)
+            
+            # ===== Tab 4: Sequencing Order =====
+            with gr.TabItem("Sequencing Order"):
+                with gr.Column(elem_classes="card"):
+                    gr.Markdown("### Sequencing Priority Order")
+                    
+                    order_output = gr.Dataframe(
+                        label="Sorted by Sequencing Priority"
+                    )
+                    
+                    with gr.Column(elem_classes="info-card"):
+                        gr.Markdown("""
+                        **Sequencing Priority**
+                        - Order 1: Highest priority (Best quality)
+                        - Order 2: High priority
+                        - Order 3: Medium priority
+                        - Order 4: Lowest priority (Quality issues or low concentration)
+                        """)
+            
+            # ===== Tab 5: Preview =====
+            with gr.TabItem("Preview"):
+                with gr.Column(elem_classes="card"):
+                    gr.Markdown("### Quick Data Overview")
+                    
+                    preview_output = gr.Dataframe(
+                        label="Key Sample Preview (Top 10)"
+                    )
+                    
+                    with gr.Row():
+                        with gr.Column(elem_classes="info-card"):
+                            gr.Markdown("""
+                            **Column Descriptions**
+                            
+                            Sample Name: Unique identifier for each sample
+                            
+                            Concentration: DNA/RNA concentration in ng/uL
+                            
+                            Concentration Level: High (>=50), Medium (20-50), Low (<20)
+                            
+                            Order: Sequencing priority ranking (1 = Highest, 4 = Lowest)
+                            """)
+                        with gr.Column(elem_classes="info-card"):
+                            gr.Markdown("""
+                            **Quality Thresholds**
+                            
+                            260/280 Ratio: Acceptable range 1.8 - 2.0
+                            
+                            260/230 Ratio: Acceptable >= 2.0
+                            
+                            Minimum Concentration: 20 ng/uL for gel analysis
+                            
+                            Optimal Concentration: 50 ng/uL for best results
+                            """)
+
+    # === Hidden State ===
+    file_index_state = gr.State(0)
+    
+    # === Event Handlers ===
+    
+    # Login
+    def handle_login(password):
+        if password == "980530":
+            return gr.update(visible=False), gr.update(visible=True), ""
+        else:
+            return gr.update(visible=True), gr.update(visible=False), "Incorrect password. Please try again."
+    
+    login_btn.click(
+        handle_login, 
+        inputs=pwd, 
+        outputs=[login_ui, main_ui, error_msg]
+    )
+    
+    pwd.submit(
+        handle_login, 
+        inputs=pwd, 
+        outputs=[login_ui, main_ui, error_msg]
+    )
+    
+    # Single File Load
+    def handle_single_load(file_obj):
+        df, msg = load_single_stunner(file_obj)
+        if df is not None:
+            temp_path = os.path.abspath("Single_Stunner_Result.xlsx")
+            df.data.to_excel(temp_path, index=False)
+            return df, msg, gr.update(visible=True, value=temp_path)
+        return df, msg, gr.update(visible=False)
+    
+    load_single_btn.click(
+        handle_single_load,
+        inputs=stunner_file,
+        outputs=[stunner_output, stunner_status, download_single_btn]
+    )
+    
+    # Multiple Files Browser
+    def handle_multi_load(files):
+        if not files:
+            return None, None, "Please upload files", gr.update(choices=[])
+        
+        file_names = [os.path.basename(f.name) for f in files]
+        df, _, msg, _ = load_multi_stunner(files, 0)
+        
+        return df, None, msg, gr.update(choices=file_names, value=file_names[0])
+    
+    load_multi_browser_btn.click(
+        handle_multi_load,
+        inputs=stunner_multi_files,
+        outputs=[stunner_multi_output, file_index_state, multi_browser_status, file_selector]
+    )
+    
+    def handle_file_selection(files, selected_name):
+        if not files or not selected_name:
+            return None, "No file selected"
+        
+        file_names = [os.path.basename(f.name) for f in files]
+        if selected_name in file_names:
+            idx = file_names.index(selected_name)
+            df, _, msg, _ = load_multi_stunner(files, idx)
+            return df, msg
+        return None, "File not found"
+    
+    file_selector.change(
+        handle_file_selection,
+        inputs=[stunner_multi_files, file_selector],
+        outputs=[stunner_multi_output, multi_browser_status]
+    )
+    
+    # Single File Analysis
+    def handle_single_analysis(file_obj, gel_img):
+        if file_obj is None:
+            return None, None, None, None, None, "Please upload a file"
+        result = run_master_analysis([file_obj], gel_img, mode="single")
+        return result
+    
+    single_analyze_btn.click(
+        handle_single_analysis,
+        inputs=[single_analysis_file, single_gel_image],
+        outputs=[
+            full_analysis_output,
+            download_file,
+            single_grouping_output,
+            order_output,
+            preview_output,
+            single_analysis_status
+        ]
+    )
+    
+    # Multiple Files Analysis
+    def handle_multi_analysis(files, gel_img):
+        if not files:
+            return None, None, None, None, None, "Please upload files"
+        result = run_master_analysis(files, gel_img, mode="multiple")
+        return result
+    
+    multi_analyze_btn.click(
+        handle_multi_analysis,
+        inputs=[multi_analysis_files, multi_gel_image],
+        outputs=[
+            full_analysis_output,
+            download_file,
+            multi_grouping_output,
+            order_output,
+            preview_output,
+            multi_analysis_status
+        ]
+    )
+
+
+if __name__ == "__main__":
+    demo.launch(
+        share=False, 
+        server_name="127.0.0.1", 
+        server_port=7860
+    )

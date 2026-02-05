@@ -3,6 +3,359 @@ import pandas as pd
 import numpy as np
 import cv2
 import os
+import json
+
+# --- 全域變數:預設標準 ---
+DEFAULT_STANDARDS = {
+    # 檢查開關
+    "check_parameter_1": True,
+    "check_parameter_2": True,
+    "check_parameter_3": True,
+    "check_image": True,
+    
+    # 參數值
+    "parameter_1_min": 20.0,
+    "parameter_1_pass": 50.0,
+    "parameter_2_min": 1.8,
+    "parameter_2_max": 2.0,
+    "parameter_2_pass": 1.9,
+    "parameter_3_min": 2.0,
+    "parameter_3_pass": 2.2,
+    "image_threshold_1": 50,
+    "image_threshold_2": 100,
+    
+    # 單位設定
+    "parameter_1_unit": "ng/μL",
+    "parameter_2_unit": "ratio",
+    "parameter_3_unit": "ratio",
+    "image_unit": "intensity"
+}
+
+# 當前使用的標準(會被使用者修改)
+CURRENT_STANDARDS = DEFAULT_STANDARDS.copy()
+
+
+# --- 標準管理函式 ---
+def update_standards(check_p1, check_p2, check_p3, check_img,
+                     p1_min, p1_pass, p1_unit,
+                     p2_min, p2_max, p2_pass, p2_unit,
+                     p3_min, p3_pass, p3_unit,
+                     img_t1, img_t2, img_unit):
+    """更新判定標準"""
+    global CURRENT_STANDARDS
+    CURRENT_STANDARDS = {
+        "check_parameter_1": bool(check_p1),
+        "check_parameter_2": bool(check_p2),
+        "check_parameter_3": bool(check_p3),
+        "check_image": bool(check_img),
+        "parameter_1_min": float(p1_min),
+        "parameter_1_pass": float(p1_pass),
+        "parameter_1_unit": str(p1_unit),
+        "parameter_2_min": float(p2_min),
+        "parameter_2_max": float(p2_max),
+        "parameter_2_pass": float(p2_pass),
+        "parameter_2_unit": str(p2_unit),
+        "parameter_3_min": float(p3_min),
+        "parameter_3_pass": float(p3_pass),
+        "parameter_3_unit": str(p3_unit),
+        "image_threshold_1": float(img_t1),
+        "image_threshold_2": float(img_t2),
+        "image_unit": str(img_unit)
+    }
+    return "Standards updated successfully!"
+
+def reset_standards():
+    """重置為預設標準"""
+    global CURRENT_STANDARDS
+    CURRENT_STANDARDS = DEFAULT_STANDARDS.copy()
+    return (
+        DEFAULT_STANDARDS["check_parameter_1"],
+        DEFAULT_STANDARDS["check_parameter_2"],
+        DEFAULT_STANDARDS["check_parameter_3"],
+        DEFAULT_STANDARDS["check_image"],
+        DEFAULT_STANDARDS["parameter_1_min"],
+        DEFAULT_STANDARDS["parameter_1_pass"],
+        DEFAULT_STANDARDS["parameter_1_unit"],
+        DEFAULT_STANDARDS["parameter_2_min"],
+        DEFAULT_STANDARDS["parameter_2_max"],
+        DEFAULT_STANDARDS["parameter_2_pass"],
+        DEFAULT_STANDARDS["parameter_2_unit"],
+        DEFAULT_STANDARDS["parameter_3_min"],
+        DEFAULT_STANDARDS["parameter_3_pass"],
+        DEFAULT_STANDARDS["parameter_3_unit"],
+        DEFAULT_STANDARDS["image_threshold_1"],
+        DEFAULT_STANDARDS["image_threshold_2"],
+        DEFAULT_STANDARDS["image_unit"],
+        "Standards reset to default!"
+    )
+
+def save_standards_preset(preset_name):
+    """儲存當前標準為預設檔"""
+    if not preset_name:
+        return None, "Please enter a preset name"
+    
+    preset_file = f"{preset_name}_standards.json"
+    with open(preset_file, 'w') as f:
+        json.dump(CURRENT_STANDARDS, f, indent=2)
+    
+    return preset_file, f"Preset '{preset_name}' saved successfully!"
+
+def load_standards_preset(preset_file):
+    """載入預設檔"""
+    global CURRENT_STANDARDS
+    if preset_file is None:
+        return (None,)*17 + ("Please select a preset file",)
+    
+    try:
+        with open(preset_file.name, 'r') as f:
+            CURRENT_STANDARDS = json.load(f)
+        
+        return (
+            CURRENT_STANDARDS["check_parameter_1"],
+            CURRENT_STANDARDS["check_parameter_2"],
+            CURRENT_STANDARDS["check_parameter_3"],
+            CURRENT_STANDARDS["check_image"],
+            CURRENT_STANDARDS["parameter_1_min"],
+            CURRENT_STANDARDS["parameter_1_pass"],
+            CURRENT_STANDARDS["parameter_1_unit"],
+            CURRENT_STANDARDS["parameter_2_min"],
+            CURRENT_STANDARDS["parameter_2_max"],
+            CURRENT_STANDARDS["parameter_2_pass"],
+            CURRENT_STANDARDS["parameter_2_unit"],
+            CURRENT_STANDARDS["parameter_3_min"],
+            CURRENT_STANDARDS["parameter_3_pass"],
+            CURRENT_STANDARDS["parameter_3_unit"],
+            CURRENT_STANDARDS["image_threshold_1"],
+            CURRENT_STANDARDS["image_threshold_2"],
+            CURRENT_STANDARDS["image_unit"],
+            "Preset loaded successfully!"
+        )
+    except Exception as e:
+        return (None,)*17 + (f"Error loading preset: {str(e)}",)
+
+
+def analyze_custom_standards_data(file_objs):
+    """在自訂標準頁面分析多個 Excel 檔案"""
+    if not file_objs:
+        return None, None, "Please upload Excel files"
+    
+    all_results = []
+    
+    # 取得當前標準和單位
+    p1_min = CURRENT_STANDARDS["parameter_1_min"]
+    p1_pass = CURRENT_STANDARDS["parameter_1_pass"]
+    p1_unit = CURRENT_STANDARDS["parameter_1_unit"]
+    
+    p2_min = CURRENT_STANDARDS["parameter_2_min"]
+    p2_max = CURRENT_STANDARDS["parameter_2_max"]
+    p2_pass = CURRENT_STANDARDS["parameter_2_pass"]
+    p2_unit = CURRENT_STANDARDS["parameter_2_unit"]
+    
+    p3_min = CURRENT_STANDARDS["parameter_3_min"]
+    p3_pass = CURRENT_STANDARDS["parameter_3_pass"]
+    p3_unit = CURRENT_STANDARDS["parameter_3_unit"]
+    
+    check_p1 = CURRENT_STANDARDS["check_parameter_1"]
+    check_p2 = CURRENT_STANDARDS["check_parameter_2"]
+    check_p3 = CURRENT_STANDARDS["check_parameter_3"]
+    
+    for f in file_objs:
+        try:
+            # 用 header=0 讀取 demo 檔案格式
+            df_raw = pd.read_excel(f.name, header=0)
+            
+            for i in range(len(df_raw)):
+                try:
+                    sample_name = str(df_raw.iloc[i, 1])
+                    param1 = round(float(df_raw.iloc[i, 2]))
+                    param2 = float(df_raw.iloc[i, 3])
+                    param3 = float(df_raw.iloc[i, 4])
+                    
+                    issues = []
+                    
+                    # 根據開關檢查各參數
+                    if check_p1 and param1 < p1_min:
+                        issues.append(f"Parameter 1 < {p1_min} {p1_unit}")
+                    
+                    if check_p2:
+                        if param2 < p2_min:
+                            issues.append(f"Parameter 2 < {p2_min} {p2_unit}")
+                        if param2 > p2_max:
+                            issues.append(f"Parameter 2 > {p2_max} {p2_unit}")
+                    
+                    if check_p3 and param3 < p3_min:
+                        issues.append(f"Parameter 3 < {p3_min} {p3_unit}")
+                    
+                    # 判定結果
+                    if len(issues) > 0:
+                        quality = 'FAIL'
+                        note = '; '.join(issues)
+                    else:
+                        # 檢查是否符合標準
+                        pass_conditions = []
+                        if check_p1:
+                            pass_conditions.append(param1 >= p1_pass)
+                        if check_p2:
+                            pass_conditions.append(param2 >= p2_pass)
+                        if check_p3:
+                            pass_conditions.append(param3 >= p3_pass)
+                        
+                        if all(pass_conditions):
+                            quality = 'PASS'
+                            note = 'Excellent quality'
+                        else:
+                            quality = 'ACCEPTABLE'
+                            note = 'Meets minimum requirements'
+                    
+                    result_row = {
+                        'Sample Name': sample_name,
+                        f'Parameter 1 ({p1_unit})': param1,
+                        f'Parameter 2 ({p2_unit})': param2,
+                        f'Parameter 3 ({p3_unit})': param3,
+                        'QC': quality,
+                        'Note': note
+                    }
+                    all_results.append(result_row)
+                    
+                except Exception as e:
+                    try:
+                        sample_name = str(df_raw.iloc[i, 1])
+                    except:
+                        sample_name = 'Unknown'
+                    
+                    all_results.append({
+                        'Sample Name': sample_name,
+                        f'Parameter 1 ({p1_unit})': 'ERROR',
+                        f'Parameter 2 ({p2_unit})': 'ERROR',
+                        f'Parameter 3 ({p3_unit})': 'ERROR',
+                        'QC': 'ERROR',
+                        'Note': f'Cannot read values: {str(e)}'
+                    })
+        except Exception as e:
+            all_results.append({
+                'Sample Name': f'File Error: {os.path.basename(f.name)}',
+                f'Parameter 1 ({p1_unit})': 'ERROR',
+                f'Parameter 2 ({p2_unit})': 'ERROR',
+                f'Parameter 3 ({p3_unit})': 'ERROR',
+                'QC': 'ERROR',
+                'Note': f'Cannot read file: {str(e)}'
+            })
+            continue
+    
+    if not all_results:
+        return None, None, "Failed to process any files"
+    
+    # 建立 DataFrame
+    result_df = pd.DataFrame(all_results)
+    
+    # 儲存為 Excel (使用你的 generate_qc_report 函數)
+    output_path = os.path.abspath("(Custom)QC_Analysis_Report.xlsx")
+    generate_qc_report(result_df, output_path)
+    
+    success_msg = f"Analysis completed! Processed {len(all_results)} samples."
+    
+    return result_df, output_path, success_msg
+
+from openpyxl import Workbook
+from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.styles import PatternFill, Font
+
+def generate_qc_report(df, file_name="(Custom)QC_Analysis_Report.xlsx"):
+    # 建立活頁簿與工作表
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Analysis Results"
+
+    # 定義樣式
+    blue_fill = PatternFill(start_color="598BAB", fill_type="solid")  # 標題用藍色
+    green_fill = PatternFill(start_color="CDFFCF", fill_type="solid")  # 合格
+    yellow_fill = PatternFill(start_color="FFFF99", fill_type="solid")  # 可接受
+    red_fill = PatternFill(start_color="FFA3A3", fill_type="solid")  # 不合格
+    
+    # 寫入 DataFrame 到工作表
+    for r in dataframe_to_rows(df, index=False, header=True):
+        ws.append(r)
+    
+    # 標題列上色 (第一列)
+    for cell in ws[1]:  
+        cell.fill = blue_fill
+        cell.font = Font(bold=True, color="e7cd79")  # 白色粗體字
+    
+    # 找出需要處理的欄位索引
+    try:
+        ratio_280_col = df.columns.get_loc("260/280") + 1  # +1 因為 openpyxl 從 1 開始
+    except KeyError:
+        ratio_280_col = None
+        print("找不到 260/280 欄位")
+    
+    try:
+        ratio_230_col = df.columns.get_loc("260/230") + 1
+    except KeyError:
+        ratio_230_col = None
+        print("找不到 260/230 欄位")
+    
+    try:
+        status_col = df.columns.get_loc("QC") + 1
+    except KeyError:
+        status_col = None
+        print("找不到 Status 欄位")
+    
+    # 從第二列開始處理資料 (跳過標題)
+    for row_idx in range(2, ws.max_row + 1):
+        
+        # 處理 260/280 欄位上色
+        if ratio_280_col:
+            ratio_280_cell = ws.cell(row=row_idx, column=ratio_280_col)
+            ratio_280_value = ratio_280_cell.value
+            
+            if ratio_280_value is not None:
+                try:
+                    ratio_280_value = float(ratio_280_value)
+                    if 2.0 <= ratio_280_value <= 2.2:
+                        ratio_280_cell.fill = green_fill
+                    else:
+                        ratio_280_cell.fill = red_fill
+                except (ValueError, TypeError):
+                    ratio_280_cell.fill = red_fill
+        
+        # 處理 260/230 欄位上色
+        if ratio_230_col:
+            ratio_230_cell = ws.cell(row=row_idx, column=ratio_230_col)
+            ratio_230_value = ratio_230_cell.value
+            
+            if ratio_230_value is not None:
+                try:
+                    ratio_230_value = float(ratio_230_value)
+                    if ratio_230_value >= 1.5:
+                        ratio_230_cell.fill = green_fill
+                    else:
+                        ratio_230_cell.fill = red_fill
+                except (ValueError, TypeError):
+                    ratio_230_cell.fill = red_fill
+            else:
+                ratio_230_cell.fill = red_fill
+        
+        # 處理 Status 欄位上色
+        if status_col:
+            status_cell = ws.cell(row=row_idx, column=status_col)
+            status_value = str(status_cell.value).upper() if status_cell.value else ""
+            
+            if status_value == "PASS":
+                status_cell.fill = green_fill
+            elif status_value == "ACCEPTABLE":
+                status_cell.fill = yellow_fill
+            elif status_value == "FAIL":
+                status_cell.fill = red_fill
+
+    # 設定欄寬
+    for column in ws.columns:
+        ws.column_dimensions[column[0].column_letter].width = 20
+
+    # 儲存檔案
+    wb.save(file_name)
+    print(f" Report saved as {file_name}")
+
+#笑到崩潰直接寫到亂倒一鍋粥,那這碗粥就直接claude喝下去吧
 
 # --- 1. Gel Image Analysis Logic ---
 def analyze_gel_image(image_path, lane_index, total_lanes=14):
@@ -38,14 +391,14 @@ def analyze_gel_image(image_path, lane_index, total_lanes=14):
     avg_brightness = np.mean(lane_roi)
     
     # 初步判斷是否有 Smearing(拖尾現象)
-    # ⚠️ 門檻值 50 可依樣本特性調整
+    # 門檻值 50 可依樣本特性調整
     if avg_brightness > 50:
         smear_status = "Smearing"
     else:
         smear_status = "Clean"
 
     # 偵測三個標記區域的亮度
-    # ⚠️ 這些比例 (0.15, 0.25 等) 需依實際 Ladder 位置調整
+    # 這些比例 (0.15, 0.25 等) 需依實際 Ladder 位置調整
     bright_20k = np.max(lane_roi[int(h*0.15):int(h*0.25), :])  # 20kb 區域
     bright_5k  = np.max(lane_roi[int(h*0.45):int(h*0.55), :])  # 5kb 區域
     bright_3k  = np.max(lane_roi[int(h*0.65):int(h*0.75), :])  # 3kb 區域
@@ -76,7 +429,7 @@ def analyze_gel_image(image_path, lane_index, total_lanes=14):
             else:
                 smear_status = ""
 
-    # 備註:條帶完整度判定
+    # 條帶完整度判定
     if smear_status != "Smear":
         status = ""
         integrity_score = "Low"
@@ -111,76 +464,6 @@ def analyze_gel_image(image_path, lane_index, total_lanes=14):
     return smear_status, integrity_score, n_result
 
 
-# --- 2. Stunner Data Loading with Color Annotation ---
-def load_single_stunner(file_obj):
-    """
-    載入單一 Stunner 檔案並標註品質
-    功能:讀取 Stunner 儀器導出的 Excel 並自動判定品質狀態
-    """
-    if file_obj is None:
-        return None, "Please select a file"
-    
-    try:
-        # header=23 代表從第 24 行開始讀取數據
-        # 若 Stunner 儀器格式變更,需調整此數字
-        df = pd.read_excel(file_obj.name, header=23)
-        
-        # 新增兩個欄位用於品質判定
-        df['Quality Check'] = ''
-        df['Note'] = ''
-        
-        # 逐筆樣本進行品質判定
-        for i in range(len(df)):
-            try:
-                # ⚠️ iloc[i, 9]  → 濃度 (Concentration)
-                # ⚠️ iloc[i, 11] → 260/280 Ratio
-                # ⚠️ iloc[i, 12] → 260/230 Ratio
-                con = float(df.iloc[i, 9])
-                ratio_280_260 = float(df.iloc[i, 11])
-                ratio_260_230 = float(df.iloc[i, 12])
-                
-                issues = []
-                
-                # 濃度檢查
-                if con < 20:
-                    issues.append("Low concentration")
-                
-                # 260/280 檢查 - 正常範圍 1.8~2.0
-                if ratio_280_260 < 1.8:
-                    issues.append("260/280 too low")
-                
-                if ratio_280_260 > 2.0:
-                    issues.append("260/280 too high")
-                
-                # 260/230 檢查 - 正常範圍 ≥ 2.0
-                if ratio_260_230 < 2.0:
-                    issues.append("260/230 abnormal")
-                
-                # 評級標準
-                if len(issues) > 0:
-                    df.at[i, 'Quality Check'] = 'FAIL'
-                    df.at[i, 'Note'] = '; '.join(issues)
-                elif con >= 50 and ratio_280_260 >= 1.9 and ratio_260_230 >= 2.2:
-                    df.at[i, 'Quality Check'] = 'PASS'
-                    df.at[i, 'Note'] = 'Excellent quality'
-                else:
-                    df.at[i, 'Quality Check'] = 'ACCEPTABLE'
-                    df.at[i, 'Note'] = 'Meets minimum standard'
-                    
-            except:
-                df.at[i, 'Quality Check'] = 'ERROR'
-                df.at[i, 'Note'] = 'Cannot read values'
-        
-        # 套用顏色樣式
-        styled_df = style_dataframe(df)
-        success_msg = f"Successfully loaded {len(df)} samples"
-        return styled_df, success_msg
-    
-    except Exception as e:
-        error_msg = f"Loading failed: {str(e)}"
-        return None, error_msg
-
-
 def style_dataframe(df):
     """
     表格顏色標註函式
@@ -206,31 +489,24 @@ def style_dataframe(df):
     return df.style.apply(color_rows, axis=1)
 
 
-def load_multi_stunner(file_objs, selected_file_index):
+# --- 2. Stunner Data Loading with Color Annotation ---
+def load_single_stunner(file_obj):
     """
-    載入多個 Stunner 檔案並支援切換瀏覽
-    功能:處理多檔案上傳,允許使用者切換查看不同檔案
+    載入單一 Stunner 檔案
+    功能:處理單一檔案上傳並分析品質
     """
-    if not file_objs:
-        return None, None, "Please upload files", []
-    
-    file_names = [f.name for f in file_objs]
-    
-    if selected_file_index is None:
-        selected_file_index = 0
-    
-    if selected_file_index >= len(file_objs):
-        selected_file_index = 0
+    if file_obj is None:
+        return None, None, "Please upload a file"
     
     try:
-        df = pd.read_excel(file_objs[selected_file_index].name, header=23)
+        df = pd.read_excel(file_obj.name, header=23)
         
         df['Quality Check'] = ''
         df['Note'] = ''
         
         for i in range(len(df)):
             try:
-                con = float(df.iloc[i, 9])
+                con = round(float(df.iloc[i, 9]))
                 ratio_280_260 = float(df.iloc[i, 11])
                 ratio_260_230 = float(df.iloc[i, 12])
                 
@@ -257,14 +533,191 @@ def load_multi_stunner(file_objs, selected_file_index):
                 df.at[i, 'Quality Check'] = 'ERROR'
                 df.at[i, 'Note'] = 'Cannot read values'
         
-        styled_df = style_dataframe(df)
-        file_info = f"Viewing file {selected_file_index + 1} of {len(file_objs)}: {os.path.basename(file_names[selected_file_index])}"
+        # 儲存檔案
+        base_name = os.path.basename(file_obj.name)
+        output_filename = f"Single_Stunner_{base_name}"
+        output_path = os.path.abspath(output_filename)
         
-        return styled_df, None, file_info, file_names
+        # 使用 openpyxl 建立有格式的 Excel
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Stunner Results"
+        
+        # 定義樣式
+        blue_fill = PatternFill(start_color="598BAB", fill_type="solid")
+        green_fill = PatternFill(start_color="CDFFCF", fill_type="solid")
+        yellow_fill = PatternFill(start_color="FFFF99", fill_type="solid")
+        red_fill = PatternFill(start_color="FFC7CE", fill_type="solid")
+        gray_fill = PatternFill(start_color="D3D3D3", fill_type="solid")
+        
+        # 寫入數據
+        for r in dataframe_to_rows(df, index=False, header=True):
+            ws.append(r)
+        
+        # 標題列上色
+        for cell in ws[1]:
+            cell.fill = blue_fill
+            cell.font = Font(bold=True, color="FFFFFF")
+        
+        # 找到 Quality Check 欄位索引
+        try:
+            qc_col = df.columns.get_loc("Quality Check") + 1
+        except:
+            qc_col = None
+        
+        # 為 Quality Check 欄位上色
+        if qc_col:
+            for row_idx in range(2, ws.max_row + 1):
+                qc_cell = ws.cell(row=row_idx, column=qc_col)
+                qc_value = str(qc_cell.value).upper() if qc_cell.value else ""
+                
+                if qc_value == 'PASS':
+                    qc_cell.fill = green_fill
+                elif qc_value == 'ACCEPTABLE':
+                    qc_cell.fill = yellow_fill
+                elif qc_value == 'FAIL':
+                    qc_cell.fill = red_fill
+                elif qc_value == 'ERROR':
+                    qc_cell.fill = gray_fill
+        
+        # 設定欄寬
+        for column in ws.columns:
+            ws.column_dimensions[column[0].column_letter].width = 20
+        
+        wb.save(output_path)
+        
+        styled_df = style_dataframe(df)
+        return styled_df, output_path, f"File loaded successfully: {base_name}"
+        
+    except Exception as e:
+        return None, None, f"Error loading file: {str(e)}"
+
+
+def load_multi_stunner(file_objs, selected_file_index):
+    """
+    載入多個 Stunner 檔案並支援切換瀏覽
+    功能:處理多檔案上傳,允許使用者切換查看不同檔案
+    """
+    if not file_objs:
+        return None, None, "Please upload files", [], gr.update(visible=False)
+    
+    file_names = [os.path.basename(f.name) for f in file_objs]
+    
+    if selected_file_index is None:
+        selected_file_index = 0
+    
+    if selected_file_index >= len(file_objs):
+        selected_file_index = 0
+    
+    try:
+        df = pd.read_excel(file_objs[selected_file_index].name, header=23)
+        
+        df['Quality Check'] = ''
+        df['Note'] = ''
+        
+        for i in range(len(df)):
+            try:
+                con = round(float(df.iloc[i, 9]))
+                ratio_280_260 = float(df.iloc[i, 11])
+                ratio_260_230 = float(df.iloc[i, 12])
+                
+                issues = []
+                
+                if con < 20:
+                    issues.append("Low concentration")
+                if ratio_280_260 < 1.8 or ratio_280_260 > 2.0:
+                    issues.append("260/280 abnormal")
+                if ratio_260_230 < 2.0:
+                    issues.append("260/230 abnormal")
+                
+                if len(issues) > 0:
+                    df.at[i, 'Quality Check'] = 'FAIL'
+                    df.at[i, 'Note'] = '; '.join(issues)
+                elif con >= 50 and ratio_280_260 >= 1.9 and ratio_260_230 >= 2.2:
+                    df.at[i, 'Quality Check'] = 'PASS'
+                    df.at[i, 'Note'] = 'Excellent quality'
+                else:
+                    df.at[i, 'Quality Check'] = 'ACCEPTABLE'
+                    df.at[i, 'Note'] = 'Meets minimum standard'
+                    
+            except:
+                df.at[i, 'Quality Check'] = 'ERROR'
+                df.at[i, 'Note'] = 'Cannot read values'
+        
+        # 儲存當前檔案使用 openpyxl 來上色和分隔
+        base_name = os.path.basename(file_names[selected_file_index])
+        output_filename = f"Multi_Stunner_{base_name}"
+        output_path = os.path.abspath(output_filename)
+        
+        # 使用 openpyxl 建立有格式的 Excel
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Stunner Results"
+        
+        # 定義樣式
+        blue_fill = PatternFill(start_color="598BAB", fill_type="solid")
+        green_fill = PatternFill(start_color="CDFFCF", fill_type="solid")
+        yellow_fill = PatternFill(start_color="FFFF99", fill_type="solid")
+        red_fill = PatternFill(start_color="FFC7CE", fill_type="solid")
+        gray_fill = PatternFill(start_color="D3D3D3", fill_type="solid")
+        
+        # 分離原始數據和 QC 數據
+        original_columns = [col for col in df.columns if col not in ['Quality Check', 'Note']]
+        qc_columns = ['Quality Check', 'Note']
+        
+        # 寫入標題列 - 原始數據部分
+        for idx, col in enumerate(original_columns, 1):
+            cell = ws.cell(row=1, column=idx, value=col)
+            cell.fill = blue_fill
+            cell.font = Font(bold=True, color="FFFFFF")
+        
+        # 寫入標題列 - QC 部分從 W 欄開始 (第 23 欄)
+        qc_start_col = 23  # W 欄
+        for idx, col in enumerate(qc_columns, qc_start_col):
+            cell = ws.cell(row=1, column=idx, value=col)
+            cell.fill = blue_fill
+            cell.font = Font(bold=True, color="FFFFFF")
+        
+        # 寫入數據
+        for row_idx, (_, row) in enumerate(df.iterrows(), 2):
+            # 寫入原始數據
+            for col_idx, col in enumerate(original_columns, 1):
+                ws.cell(row=row_idx, column=col_idx, value=row[col])
+            
+            # 寫入 QC 數據並上色
+            quality_check = row['Quality Check']
+            
+            # Quality Check 欄位
+            qc_cell = ws.cell(row=row_idx, column=qc_start_col, value=quality_check)
+            
+            # 根據 Quality Check 值上色
+            if quality_check == 'PASS':
+                qc_cell.fill = green_fill
+            elif quality_check == 'ACCEPTABLE':
+                qc_cell.fill = yellow_fill
+            elif quality_check == 'FAIL':
+                qc_cell.fill = red_fill
+            elif quality_check == 'ERROR':
+                qc_cell.fill = gray_fill
+            
+            # Note 欄位
+            ws.cell(row=row_idx, column=qc_start_col + 1, value=row['Note'])
+        
+        # 設定欄寬
+        for column in ws.columns:
+            ws.column_dimensions[column[0].column_letter].width = 20
+        
+        # 儲存檔案
+        wb.save(output_path)
+        
+        styled_df = style_dataframe(df)
+        file_info = f"Viewing file {selected_file_index + 1} of {len(file_objs)}: {base_name}"
+        
+        return styled_df, None, file_info, file_names, gr.update(visible=True, value=output_path)
         
     except Exception as e:
         error_msg = f"Error loading file: {str(e)}"
-        return None, None, error_msg, file_names
+        return None, None, error_msg, file_names, gr.update(visible=False)
 
 
 # --- 3. Master Analysis System with Separated Raw Data ---
@@ -281,15 +734,15 @@ def run_master_analysis(file_objs, gel_image, mode="single"):
     
     # 處理每個上傳的檔案
     for f in file_objs:
-        df_raw = pd.read_excel(f.name, header=23)
+        df_raw = pd.read_excel(f.name, header=0)
         
         for i in range(len(df_raw)):
             current_sample = str(df_raw.iloc[i, 1])
             
             try:
-                con = float(df_raw.iloc[i, 9])
-                ratio_280_260 = float(df_raw.iloc[i, 11])
-                ratio_260_230 = float(df_raw.iloc[i, 12])
+                con = round(float(df_raw.iloc[i, 2]))
+                ratio_280_260 = float(df_raw.iloc[i, 3])
+                ratio_260_230 = float(df_raw.iloc[i, 4])
                 
                 # 保存 raw data
                 raw_row = [
@@ -370,20 +823,52 @@ def run_master_analysis(file_objs, gel_image, mode="single"):
         ]
     )
 
-    # 儲存到 Excel
+    # 儲存到 Excel (使用 openpyxl 來上色)
     if mode == "single":
         save_path = os.path.abspath("Single_Analysis_Report.xlsx")
     else:
         save_path = os.path.abspath("Multiple_Analysis_Report.xlsx")
     
-    with pd.ExcelWriter(save_path, engine='openpyxl') as writer:
-        raw_data_df.to_excel(writer, sheet_name='Analysis Report',
-                              index=False, startrow=0)
-        
-        separator_row = len(raw_data_df) + 2
-        
-        analysis_df.to_excel(writer, sheet_name='Analysis Report',
-                              index=False, startrow=separator_row)
+    wb = Workbook()
+    
+    # Sheet 1: Raw Data
+    ws1 = wb.active
+    ws1.title = "Raw Data"
+    
+    # 定義樣式
+    blue_fill = PatternFill(start_color="598BAB", fill_type="solid")
+    
+    # 寫入 Raw Data
+    for r in dataframe_to_rows(raw_data_df, index=False, header=True):
+        ws1.append(r)
+    
+    # 標題列上色
+    for cell in ws1[1]:
+        cell.fill = blue_fill
+        cell.font = Font(bold=True, color="FFFFFF")
+    
+    # 設定欄寬
+    for column in ws1.columns:
+        ws1.column_dimensions[column[0].column_letter].width = 20
+    
+    # Sheet 2: Analysis Results
+    ws2 = wb.create_sheet(title="Analysis Results")
+    
+    # 寫入 Analysis Results
+    for r in dataframe_to_rows(analysis_df, index=False, header=True):
+        ws2.append(r)
+    
+    # 標題列上色
+    for cell in ws2[1]:
+        cell.fill = blue_fill
+        cell.font = Font(bold=True, color="FFFFFF")
+    
+    # 設定欄寬
+    for column in ws2.columns:
+        ws2.column_dimensions[column[0].column_letter].width = 20
+    
+    # 儲存檔案
+    wb.save(save_path)
 
     # 建立濃度分組表
     group_df = analysis_df[
@@ -430,7 +915,7 @@ def check_password(password):
     """
     備註:密碼驗證函式
     """
-    if password == "310496":
+    if password == "660531" or password == "19770531" or password == "1977531" or password == "066531" or password == "0660531" or password == "019770531" or password == "01977531" or password == "980530":
         return gr.update(visible=False), gr.update(visible=True), ""
     else:
         return gr.update(visible=True), gr.update(visible=False), "Incorrect password. Please try again."
@@ -721,10 +1206,233 @@ with gr.Blocks(title="Analysis System", css=custom_css) as demo:
 
     # === Main Interface ===
     with gr.Column(visible=False) as main_ui:
-        gr.Markdown("<h1 style='text-align:center;'>Analysis System</h1>")
-        gr.Markdown("<p class='subtitle' style='text-align:center;'>Advanced Genomic Sample Quality Control Platform</p>")
+        gr.Markdown("<h1 style='text-align:center;'>Data Analysis Platform</h1>")
+        gr.Markdown("<p class='subtitle' style='text-align:center;'>Data Quality Assessment System</p>")
         
         with gr.Tabs():
+            
+            # ===== Tab 0: Custom Standards Settings =====
+            with gr.TabItem("Custom Standards"):
+                with gr.Column(elem_classes="card"):
+                    gr.Markdown("### Standards Configuration")
+                    gr.Markdown("Set your own thresholds and units for quality assessment. Changes apply immediately.")
+                    
+                    # 檢查開關
+                    with gr.Column(elem_classes="info-card"):
+                        gr.Markdown("#### Enable/Disable Checks")
+                        with gr.Row():
+                            check_p1 = gr.Checkbox(
+                                label="Check Parameter 1", 
+                                value=DEFAULT_STANDARDS["check_parameter_1"]
+                            )
+                            check_p2 = gr.Checkbox(
+                                label="Check Parameter 2", 
+                                value=DEFAULT_STANDARDS["check_parameter_2"]
+                            )
+                            check_p3 = gr.Checkbox(
+                                label="Check Parameter 3", 
+                                value=DEFAULT_STANDARDS["check_parameter_3"]
+                            )
+                            check_img = gr.Checkbox(
+                                label="Check Image Analysis", 
+                                value=DEFAULT_STANDARDS["check_image"]
+                            )
+                    
+                    gr.Markdown("---")
+                    
+                    with gr.Row():
+                        # 參數 1
+                        with gr.Column():
+                            gr.Markdown("#### Parameter 1 Settings")
+                            
+                            p1_unit = gr.Dropdown(
+                                label="Unit",
+                                choices=["ng/μL", "μg/mL", "mg/mL", "ppm", "custom"],
+                                value=DEFAULT_STANDARDS["parameter_1_unit"],
+                                allow_custom_value=True
+                            )
+                            
+                            p1_min = gr.Number(
+                                label="Minimum Threshold",
+                                value=DEFAULT_STANDARDS["parameter_1_min"],
+                                info="Below this = Low quality"
+                            )
+                            
+                            p1_pass = gr.Number(
+                                label="Pass Threshold",
+                                value=DEFAULT_STANDARDS["parameter_1_pass"],
+                                info="Above this = High quality (PASS)"
+                            )
+                        
+                        # 參數 2
+                        with gr.Column():
+                            gr.Markdown("#### Parameter 2 Settings")
+                            
+                            p2_unit = gr.Dropdown(
+                                label="Unit",
+                                choices=["ratio", "%", "score", "index", "custom"],
+                                value=DEFAULT_STANDARDS["parameter_2_unit"],
+                                allow_custom_value=True
+                            )
+                            
+                            p2_min = gr.Number(
+                                label="Minimum Threshold",
+                                value=DEFAULT_STANDARDS["parameter_2_min"],
+                                info="Normal range minimum"
+                            )
+                            
+                            p2_max = gr.Number(
+                                label="Maximum Threshold",
+                                value=DEFAULT_STANDARDS["parameter_2_max"],
+                                info="Normal range maximum"
+                            )
+                            
+                            p2_pass = gr.Number(
+                                label="Pass Threshold",
+                                value=DEFAULT_STANDARDS["parameter_2_pass"],
+                                info="For excellent quality"
+                            )
+                    
+                    with gr.Row():
+                        # 參數 3
+                        with gr.Column():
+                            gr.Markdown("#### Parameter 3 Settings")
+                            
+                            p3_unit = gr.Dropdown(
+                                label="Unit",
+                                choices=["ratio", "%", "score", "index", "custom"],
+                                value=DEFAULT_STANDARDS["parameter_3_unit"],
+                                allow_custom_value=True
+                            )
+                            
+                            p3_min = gr.Number(
+                                label="Minimum Threshold",
+                                value=DEFAULT_STANDARDS["parameter_3_min"],
+                                info="Normal range minimum"
+                            )
+                            
+                            p3_pass = gr.Number(
+                                label="Pass Threshold",
+                                value=DEFAULT_STANDARDS["parameter_3_pass"],
+                                info="For excellent quality"
+                            )
+                        
+                        # 影像分析
+                        with gr.Column():
+                            gr.Markdown("#### Image Analysis Settings")
+                            
+                            img_unit = gr.Dropdown(
+                                label="Unit",
+                                choices=["intensity", "brightness", "value", "custom"],
+                                value=DEFAULT_STANDARDS["image_unit"],
+                                allow_custom_value=True
+                            )
+                            
+                            img_t1 = gr.Number(
+                                label="Threshold 1",
+                                value=DEFAULT_STANDARDS["image_threshold_1"],
+                                info="Smearing detection threshold"
+                            )
+                            
+                            img_t2 = gr.Number(
+                                label="Threshold 2",
+                                value=DEFAULT_STANDARDS["image_threshold_2"],
+                                info="Band visibility threshold"
+                            )
+                    
+                    gr.Markdown("---")
+                    
+                    # 操作按鈕
+                    with gr.Row():
+                        update_btn = gr.Button(
+                            "Apply Custom Standards", 
+                            variant="primary", 
+                            elem_classes="primary-btn",
+                            scale=2
+                        )
+                        reset_btn = gr.Button(
+                            "Reset to Default", 
+                            scale=1
+                        )
+                    
+                    standards_status = gr.Textbox(
+                        label="Status", 
+                        interactive=False,
+                        lines=2
+                    )
+                    
+                    gr.Markdown("---")
+                    
+                    # 預設檔管理
+                    with gr.Column(elem_classes="info-card"):
+                        gr.Markdown("#### Save/Load Presets")
+                        
+                        with gr.Row():
+                            preset_name_input = gr.Textbox(
+                                label="Preset Name",
+                                placeholder="e.g., RNA_Standards, DNA_Standards"
+                            )
+                            save_preset_btn = gr.Button("Save Preset")
+                        
+                        preset_download = gr.File(
+                            label="Download Preset File",
+                            visible=False
+                        )
+                        
+                        with gr.Row():
+                            preset_file_input = gr.File(
+                                label="Load Preset File (.json)",
+                                file_count="single"
+                            )
+                            load_preset_btn = gr.Button("Load Preset")
+                    
+                    gr.Markdown("---")
+                    
+                    # 多檔分析區
+                    with gr.Column(elem_classes="info-card"):
+                        gr.Markdown("#### Batch Analysis with Custom Standards")
+                        gr.Markdown("Upload multiple Excel files to analyze with current custom standards")
+                        
+                        custom_analysis_files = gr.File(
+                            label="Upload Excel Files for Analysis",
+                            file_count="multiple",
+                            file_types=[".xlsx", ".xls"]
+                        )
+                        
+                        custom_analyze_btn = gr.Button(
+                            "Analyze Files",
+                            variant="primary",
+                            elem_classes="primary-btn"
+                        )
+                        
+                        custom_analysis_status = gr.Textbox(
+                            label="Analysis Status",
+                            interactive=False,
+                            lines=2
+                        )
+                        
+                        gr.Markdown("#### Analysis Results Preview")
+                        custom_analysis_preview = gr.Dataframe(
+                            label="Results Preview (First 20 rows)",
+                            wrap=True
+                        )
+                        
+                        custom_analysis_download = gr.File(
+                            label="Download Complete Analysis Report (Excel)",
+                            visible=False
+                        )
+                    
+                    gr.Markdown("---")
+                    
+                    # 當前標準顯示
+                    with gr.Column(elem_classes="info-card"):
+                        gr.Markdown("#### Current Standards Summary")
+                        current_standards_display = gr.Textbox(
+                            label="Active Standards",
+                            value=json.dumps(CURRENT_STANDARDS, indent=2),
+                            lines=15,
+                            interactive=False
+                        )
             
             # ===== Tab 1: Stunner Data Viewer =====
             with gr.TabItem("Stunner Data Viewer"):
@@ -798,11 +1506,19 @@ with gr.Blocks(title="Analysis System", css=custom_css) as demo:
                                 interactive=True
                             )
                             
-                            multi_browser_status = gr.Textbox(
-                                label="File Information", 
-                                interactive=False,
-                                lines=2
-                            )
+                            with gr.Row():
+                                multi_browser_status = gr.Textbox(
+                                    label="File Information", 
+                                    interactive=False,
+                                    lines=2,
+                                    scale=2
+                                )
+                                download_multi_btn = gr.DownloadButton(
+                                    "Download Current File",
+                                    elem_classes="download-btn",
+                                    visible=False,
+                                    scale=1
+                                )
                             
                             stunner_multi_output = gr.Dataframe(
                                 label="Selected File Data with Quality Check",
@@ -992,7 +1708,7 @@ with gr.Blocks(title="Analysis System", css=custom_css) as demo:
     
     # Login
     def handle_login(password):
-        if password == "980530":
+        if password == "660531" or password == "19770531" or password == "1977531" or password == "066531" or password == "0660531" or password == "019770531" or password == "01977531" or password == "980530" or password == "66531":
             return gr.update(visible=False), gr.update(visible=True), ""
         else:
             return gr.update(visible=True), gr.update(visible=False), "Incorrect password. Please try again."
@@ -1009,13 +1725,91 @@ with gr.Blocks(title="Analysis System", css=custom_css) as demo:
         outputs=[login_ui, main_ui, error_msg]
     )
     
+    # Custom Standards - Update
+    update_btn.click(
+        update_standards,
+        inputs=[
+            check_p1, check_p2, check_p3, check_img,
+            p1_min, p1_pass, p1_unit,
+            p2_min, p2_max, p2_pass, p2_unit,
+            p3_min, p3_pass, p3_unit,
+            img_t1, img_t2, img_unit
+        ],
+        outputs=standards_status
+    ).then(
+        lambda: json.dumps(CURRENT_STANDARDS, indent=2),
+        outputs=current_standards_display
+    )
+    
+    # Custom Standards - Reset
+    reset_btn.click(
+        reset_standards,
+        outputs=[
+            check_p1, check_p2, check_p3, check_img,
+            p1_min, p1_pass, p1_unit,
+            p2_min, p2_max, p2_pass, p2_unit,
+            p3_min, p3_pass, p3_unit,
+            img_t1, img_t2, img_unit,
+            standards_status
+        ]
+    ).then(
+        lambda: json.dumps(CURRENT_STANDARDS, indent=2),
+        outputs=current_standards_display
+    )
+    
+    # Custom Standards - Save Preset
+    def handle_save_preset(preset_name):
+        file_path, msg = save_standards_preset(preset_name)
+        if file_path:
+            return gr.update(value=file_path, visible=True), msg
+        return gr.update(visible=False), msg
+    
+    save_preset_btn.click(
+        handle_save_preset,
+        inputs=preset_name_input,
+        outputs=[preset_download, standards_status]
+    )
+    
+    # Custom Standards - Load Preset
+    load_preset_btn.click(
+        load_standards_preset,
+        inputs=preset_file_input,
+        outputs=[
+            check_p1, check_p2, check_p3, check_img,
+            p1_min, p1_pass, p1_unit,
+            p2_min, p2_max, p2_pass, p2_unit,
+            p3_min, p3_pass, p3_unit,
+            img_t1, img_t2, img_unit,
+            standards_status
+        ]
+    ).then(
+        lambda: json.dumps(CURRENT_STANDARDS, indent=2),
+        outputs=current_standards_display
+    )
+    
+    # Custom Standards - Batch Analysis
+    def handle_custom_analysis(files):
+        if not files:
+            return None, gr.update(visible=False), "Please upload Excel files"
+        
+        df, download_path, msg = analyze_custom_standards_data(files)
+        
+        if df is not None:
+            return df.head(20), gr.update(value=download_path, visible=True), msg
+        else:
+            return None, gr.update(visible=False), msg
+    
+    custom_analyze_btn.click(
+        handle_custom_analysis,
+        inputs=custom_analysis_files,
+        outputs=[custom_analysis_preview, custom_analysis_download, custom_analysis_status]
+    )
+    
     # Single File Load
     def handle_single_load(file_obj):
-        df, msg = load_single_stunner(file_obj)
+        df, output_path, msg = load_single_stunner(file_obj)
         if df is not None:
-            temp_path = os.path.abspath("Single_Stunner_Result.xlsx")
-            df.data.to_excel(temp_path, index=False)
-            return df, msg, gr.update(visible=True, value=temp_path)
+            return df, msg, gr.update(visible=True, value=output_path)
         return df, msg, gr.update(visible=False)
     
     load_single_btn.click(
@@ -1027,34 +1821,34 @@ with gr.Blocks(title="Analysis System", css=custom_css) as demo:
     # Multiple Files Browser
     def handle_multi_load(files):
         if not files:
-            return None, None, "Please upload files", gr.update(choices=[])
+            return None, None, "Please upload files", gr.update(choices=[]), gr.update(visible=False)
         
         file_names = [os.path.basename(f.name) for f in files]
-        df, _, msg, _ = load_multi_stunner(files, 0)
+        df, _, msg, _, download_btn = load_multi_stunner(files, 0)
         
-        return df, None, msg, gr.update(choices=file_names, value=file_names[0])
+        return df, None, msg, gr.update(choices=file_names, value=file_names[0]), download_btn
     
     load_multi_browser_btn.click(
         handle_multi_load,
         inputs=stunner_multi_files,
-        outputs=[stunner_multi_output, file_index_state, multi_browser_status, file_selector]
+        outputs=[stunner_multi_output, file_index_state, multi_browser_status, file_selector, download_multi_btn]
     )
     
     def handle_file_selection(files, selected_name):
         if not files or not selected_name:
-            return None, "No file selected"
+            return None, "No file selected", gr.update(visible=False)
         
         file_names = [os.path.basename(f.name) for f in files]
         if selected_name in file_names:
             idx = file_names.index(selected_name)
-            df, _, msg, _ = load_multi_stunner(files, idx)
-            return df, msg
-        return None, "File not found"
+            df, _, msg, _, download_btn = load_multi_stunner(files, idx)
+            return df, msg, download_btn
+        return None, "File not found", gr.update(visible=False)
     
     file_selector.change(
         handle_file_selection,
         inputs=[stunner_multi_files, file_selector],
-        outputs=[stunner_multi_output, multi_browser_status]
+        outputs=[stunner_multi_output, multi_browser_status, download_multi_btn]
     )
     
     # Single File Analysis
